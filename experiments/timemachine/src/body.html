@@ -1,0 +1,45 @@
+<div class="app">
+  <div class="top">
+    <div class="brand"><b>diffcheck</b><span class="pill">OFFLINE · 로컬 처리</span></div>
+    <div class="seg" id="seg"></div>
+    <div class="tally" id="tally"></div>
+    <div class="acc" id="acc"></div>
+  </div>
+
+  <div class="body">
+    <aside class="rail">
+      <div class="rail-h"><span>버전 타임라인</span><span id="vcount"></span></div>
+      <div class="vlist" id="vlist"></div>
+      <div class="rail-f">
+        <div class="dz" id="dz">계약서 파일을 여기로<br>끌어다 놓으세요<br><span style="opacity:.7">.hwpx · .docx</span></div>
+        <button class="btn" id="btnPaste">붙여넣기로 버전 추가</button>
+        <button class="btn" id="btnCmp" disabled>대비표 만들기</button>
+      </div>
+    </aside>
+
+    <div class="mid">
+      <div class="dochead">
+        <div class="l"><div class="nm" id="hl">–</div><div class="mt" id="hlm">–</div></div>
+        <div></div>
+        <div class="r"><div class="nm" id="hr">–</div><div class="mt" id="hrm">–</div></div>
+      </div>
+      <div class="scroll" id="scroll"><div id="ruler"></div><div class="grid" id="grid"></div></div>
+    </div>
+
+    <aside class="insp">
+      <div class="itabs">
+        <button id="tabHist" aria-selected="true">조항 이력</button>
+        <button id="tabMerge" aria-selected="false">최종본 만들기</button>
+      </div>
+      <div class="ibody" id="ibody"></div>
+    </aside>
+  </div>
+
+  <div class="status">
+    <span class="live" id="stLive">조문 위에 마우스를 올리면 좌·우가 동시에 추적됩니다</span>
+    <span id="stSep"></span><span id="stDet"></span>
+    <span class="src" id="src"></span>
+  </div>
+</div>
+
+<div class="mask" id="mask"><div class="modal" id="modal"></div></div>
