@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""실제 표준계약서 43개 조 위에 협상 4라운드를 합성하고,
-정렬은 실제 알고리즘으로 계산한 뒤 uid 정답과 대조해 정확도를 산출한다."""
-import re, io, json, math, difflib
-from collections import Counter
+"""실제 표준계약서 43개 조(articles_full.tsv) 위에 협상 4회차를 합성해 versions.json을 만든다.
+
+조항마다 uid를 심어두므로, 정렬 결과의 좌우 uid가 일치하는지로 정확도를 잴 수 있다.
+그 검증은 src/aligner.reference.js 가 담당한다 — 여기서 또 정렬하지 않는다."""
+import re, io, json
 
 # ── 실물 조문 로드 ──────────────────────────────────────────────
 base = []
@@ -82,7 +83,7 @@ for r in ROUNDS:
         if "text" in e:
             t = e["text"]
             state[uid]["text"] = t(state[uid]["text"]) if callable(t) else t
-    arts, num, prev_main = [], 0, None
+    arts, num = [], 0
     for u in r["order"]:
         s = state[u]
         if u == NEW_PRICE:                       # 제N조의2 형식
@@ -93,96 +94,11 @@ for r in ROUNDS:
         arts.append({"uid": u, "label": label, "title": s["title"], "text": s["text"]})
     versions.append({**{k: r[k] for k in ("id","label","short","date","actor")}, "articles": arts})
 
-# ── 정렬 알고리즘 (POC와 동일: 앵커 + 0.4제목 0.5본문 0.1번호근접) ──
-def toks(s): return re.findall(r"[가-힣]{2,}|[A-Za-z0-9]+", s)
-def cos(c1, c2):
-    common = set(c1) & set(c2)
-    d = sum(c1[t]*c2[t] for t in common)
-    n1 = math.sqrt(sum(v*v for v in c1.values())); n2 = math.sqrt(sum(v*v for v in c2.values()))
-    return d/(n1*n2) if n1 and n2 else 0.0
-def numof(label):
-    m = re.match(r"제(\d+)조(?:의(\d+))?", label)
-    return int(m.group(1)) + (int(m.group(2))/10 if m.group(2) else 0)
-
-def align(A, B):
-    used, out = set(), []
-    for a in A:  # 1단계 앵커: 번호+제목 완전일치
-        hit = [b for b in B if b["label"] == a["label"] and b["title"] == a["title"] and id(b) not in used]
-        if hit:
-            out.append((a, hit[0], 1.0, "anchor")); used.add(id(hit[0]))
-    done = {id(m[0]) for m in out}
-    for a in A:  # 2단계 유사도
-        if id(a) in done: continue
-        best, bs = None, -1
-        for b in B:
-            if id(b) in used: continue
-            s = (0.4*cos(Counter(toks(a["title"])), Counter(toks(b["title"])))
-                 + 0.5*cos(Counter(toks(a["text"])), Counter(toks(b["text"])))
-                 + 0.1/(1+abs(numof(a["label"])-numof(b["label"]))))
-            if s > bs: best, bs = b, s
-        if best is not None and bs >= 0.30:
-            out.append((a, best, bs, "similarity")); used.add(id(best))
-        else:
-            out.append((a, None, 0.0, "deleted"))
-    for b in B:
-        if id(b) not in used: out.append((None, b, 0.0, "inserted"))
-    out.sort(key=lambda m: numof((m[0] or m[1])["label"]))
-    return out
-
-def wdiff(a, b):
-    at = re.findall(r"\S+|\s+", a); bt = re.findall(r"\S+|\s+", b)
-    sm = difflib.SequenceMatcher(a=at, b=bt, autojunk=False)
-    ah, bh = [], []
-    for op, i1, i2, j1, j2 in sm.get_opcodes():
-        A_, B_ = "".join(at[i1:i2]), "".join(bt[j1:j2])
-        if op == "equal": ah.append(A_); bh.append(B_)
-        elif op == "replace": ah.append(f"<del>{A_}</del>"); bh.append(f"<ins>{B_}</ins>")
-        elif op == "delete": ah.append(f"<del>{A_}</del>")
-        elif op == "insert": bh.append(f"<ins>{B_}</ins>")
-    return "".join(ah), "".join(bh)
-
-# ── 비교 쌍 생성 + 정확도 검증 ────────────────────────────────
-PAIRS = [("v0","v1"),("v1","v2"),("v2","v3"),("v0","v3")]
-V = {v["id"]: v for v in versions}
-pairs_out = {}
-for L, R in PAIRS:
-    A, B = V[L]["articles"], V[R]["articles"]
-    res = align(A, B)
-    ok = tot = 0
-    rows = []
-    for a, b, s, kind in res:
-        row = {"score": round(s,2)}
-        if a and b:
-            ah, bh = wdiff(a["text"], b["text"])
-            changed = a["text"] != b["text"] or a["title"] != b["title"]
-            row.update({"L": {"label":a["label"],"title":a["title"],"html":ah,"uid":a["uid"]},
-                        "R": {"label":b["label"],"title":b["title"],"html":bh,"uid":b["uid"]},
-                        "status": "same" if (not changed and a["label"]==b["label"]) else
-                                  ("edited" if changed else "moved")})
-            tot += 1; ok += (a["uid"] == b["uid"])
-        elif a:
-            row.update({"L": {"label":a["label"],"title":a["title"],"html":a["text"],"uid":a["uid"]},
-                        "R": None, "status": "deleted"})
-        else:
-            row.update({"L": None,
-                        "R": {"label":b["label"],"title":b["title"],"html":b["text"],"uid":b["uid"]},
-                        "status": "inserted"})
-        rows.append(row)
-    st = Counter(r["status"] for r in rows)
-    pairs_out[f"{L}->{R}"] = {"left":L,"right":R,"rows":rows,"stats":dict(st),
-                              "accuracy":{"correct":ok,"total":tot}}
-    print(f"{L}->{R}: {dict(st)} 정렬정확도 {ok}/{tot}")
-
-# ── 조항 이력(타임머신 계보): uid 기준 버전별 라벨 추적 ────────
-lineage = {}
-for v in versions:
-    for a in v["articles"]:
-        lineage.setdefault(a["uid"], {})[v["id"]] = {"label": a["label"], "title": a["title"],
-                                                     "len": len(a["text"])}
-out = {"versions":[{k:v[k] for k in ("id","label","short","date","actor")} | 
-                   {"count":len(v["articles"])} for v in versions],
-       "pairs":pairs_out, "lineage":lineage,
-       "source":"국가법령정보센터 공개 「민간건설공사 표준도급계약서」 일반조건"}
-io.open("rounds.json","w",encoding="utf-8").write(json.dumps(out, ensure_ascii=False))
-print("versions:", [(v['id'], v['count']) for v in out['versions']])
-print("bytes:", len(json.dumps(out, ensure_ascii=False)))
+# ── 출력: 조문 원문만 담는다 ─────────────────────────────────
+# 정렬·diff·계보는 전부 브라우저에서 계산하므로 미리 구운 결과를 싣지 않는다.
+out = {
+    "source": "국가법령정보센터 공개 「민간건설공사 표준도급계약서」 일반조건",
+    "versions": versions,
+}
+io.open("versions.json", "w", encoding="utf-8").write(json.dumps(out, ensure_ascii=False))
+print("→ versions.json", [(v["id"], len(v["articles"])) for v in versions])

@@ -14,7 +14,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TIMEMACHINE = os.path.join(HERE, "..", "timemachine")
 
 RE_HEAD = re.compile(r"제\s*(\d+)\s*조(?:의\s*(\d+))?\s*\(([^)\n]{1,40})\)")
-TOK = re.compile(r"[가-힣]{2,}|[A-Za-z0-9]+")
 
 
 def parse(txt, cap=900):
@@ -33,8 +32,12 @@ def parse(txt, cap=900):
     return out
 
 
-def bag(s):
-    return Counter(TOK.findall(s or ""))
+def ngrams(s, n):
+    s = re.sub(r"\s+", "", s or "")
+    c = Counter()
+    for i in range(len(s) - n + 1):
+        c[s[i:i + n]] += 1
+    return c
 
 
 def cos(a, b):
@@ -45,9 +48,17 @@ def cos(a, b):
     return dot / (na * nb) if na and nb else 0.0
 
 
+def contain(a, b):
+    sm, lg = (a, b) if len(a) <= len(b) else (b, a)
+    tot = sum(sm.values())
+    hit = sum(v for k, v in sm.items() if k in lg)
+    return hit / tot if tot else 0.0
+
+
 def sim(a, b):
-    """timemachine/src/app.js 의 sim() 과 동일한 가중치."""
-    return 0.35 * cos(bag(a["title"]), bag(b["title"])) + 0.65 * cos(bag(a["text"]), bag(b["text"]))
+    """timemachine/src/app.js 의 sim() 과 동일 — 문자 n-gram + 제목 포함도."""
+    return (0.35 * contain(ngrams(a["title"], 2), ngrams(b["title"], 2))
+            + 0.65 * cos(ngrams(a["text"], 3), ngrams(b["text"], 3)))
 
 
 def main():

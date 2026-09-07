@@ -4,14 +4,31 @@ const $ = id => document.getElementById(id);
 /* ═══ 1. 정렬 엔진 — 순서 보존 전역 정렬(Needleman-Wunsch) ═══
    탐욕적 매칭은 조항 하나를 잘못 붙이면 그 뒤가 줄줄이 밀린다.
    NW는 전체 점수를 최적화하므로 그 연쇄가 생기지 않는다. */
-const TOK=/[가-힣]{2,}|[A-Za-z0-9]+/g;
-function bag(s){const m=(s||"").match(TOK)||[],c=new Map();for(const t of m)c.set(t,(c.get(t)||0)+1);return c;}
-function cos(a,b){let d=0,na=0,nb=0;for(const v of a.values())na+=v*v;
-  for(const[k,v]of b){nb+=v*v;const x=a.get(k);if(x)d+=x*v;}return(na&&nb)?d/Math.sqrt(na*nb):0;}
+/* 유사도 — 문자 n-gram을 쓴다.
+   어절 토큰은 한국어 조사 때문에 무너진다: `관할법원` ↔ `관할법원의 특례` 가 0.000이 나온다.
+   형태소 분석기 없이 n-gram으로 우회한다. 제목은 길이 비대칭(본문 415자 vs 특약 82자)에
+   강하도록 코사인 대신 포함도를 쓴다. */
+function ngrams(s,n){ s=(s||"").replace(/\s+/g,""); const m=new Map();
+  for(let i=0;i+n<=s.length;i++){const g=s.slice(i,i+n); m.set(g,(m.get(g)||0)+1);} return m; }
+function cos(a,b){ let d=0,na=0,nb=0;
+  for(const v of a.values()) na+=v*v;
+  for(const [k,v] of b){ nb+=v*v; const x=a.get(k); if(x) d+=x*v; }
+  return (na&&nb)? d/Math.sqrt(na*nb) : 0; }
+function contain(a,b){ let hit=0,tot=0; const [sm,lg]= a.size<=b.size ? [a,b] : [b,a];
+  for(const [k,v] of sm){ tot+=v; if(lg.has(k)) hit+=v; } return tot? hit/tot : 0; }
+
+/* 특약·승계계약서는 본문 조를 명시적으로 인용한다 ("신탁계약 제11조에도 불구하고").
+   그 인용이 있으면 가장 확실한 근거이므로 점수를 올린다. */
+const RE_REF=/(?:신탁계약|본\s*계약|원\s*계약|원\s*도급계약)\s*제\s*(\d+)\s*조/g;
+function refs(a){ if(a._r) return a._r;
+  a._r=new Set([...(a.text||"").matchAll(RE_REF)].map(m=>+m[1])); return a._r; }
+function artNo(a){ const m=/제(\d+)조/.exec(a.label||""); return m? +m[1] : null; }
+
 function sim(a,b){
-  a._t=a._t||bag(a.title); b._t=b._t||bag(b.title);
-  a._b=a._b||bag(a.text);  b._b=b._b||bag(b.text);
-  return 0.35*cos(a._t,b._t)+0.65*cos(a._b,b._b);
+  a._t=a._t||ngrams(a.title,2); b._t=b._t||ngrams(b.title,2);
+  a._b=a._b||ngrams(a.text,3);  b._b=b._b||ngrams(b.text,3);
+  const na=artNo(a), bonus=(na!==null && refs(b).has(na)) ? 0.5 : 0;
+  return Math.min(1, bonus + 0.35*contain(a._t,b._t) + 0.65*cos(a._b,b._b));
 }
 const GAP=0.40, FLOOR=0.25;
 function align(A,B){
@@ -139,22 +156,52 @@ async function readContract(file){
 }
 
 /* ═══ 3. 상태 ═══ */
-const VS = DATA.versions.map(v=>({...v}));
+let SETI=0, VS=[];
 let L=0, R=1, hover=-1, opened=new Set(), tab="hist", merge=new Map(), rows=[];
-const SYM={same:"=",moved:"⇅",edited:"~",inserted:"+",deleted:"−"};
-const NAME={same:"동일",moved:"번호 이동",edited:"내용 변경",inserted:"신설",deleted:"삭제"};
-$("src").textContent=DATA.source;
+function loadSet(i){
+  SETI=i; const st=DATA.sets[i];
+  MODE=st.mode||"version";
+  VS=st.versions.map(v=>({...v, articles:v.articles.map(a=>({...a}))}));
+  L=0; R=Math.min(1,VS.length-1); opened=new Set(); merge=new Map();
+  $("src").textContent=st.source||"";
+}
+/* 모드에 따라 같은 정렬 결과가 다른 의미를 갖는다.
+   version: 버전 간 변경 추적 / override: 특약이 본문을 뒤집는 관계 */
+const LABELS={
+  version:{ SYM:{same:"=",moved:"⇅",edited:"~",inserted:"+",deleted:"−"},
+            NAME:{same:"동일",moved:"번호 이동",edited:"내용 변경",inserted:"신설",deleted:"삭제"},
+            fold:"same", foldText:n=>`동일한 조 ${n}개`,
+            voidL:"이 버전에 없음", voidR:"삭제됨" },
+  override:{ SYM:{same:"→",moved:"→",edited:"→",inserted:"+",deleted:"·"},
+             NAME:{same:"특약이 대체",moved:"특약이 대체",edited:"특약이 대체",
+                   inserted:"본문에 없는 신규 특약",deleted:"특약 없음 (본문 그대로)"},
+             fold:"deleted", foldText:n=>`특약이 건드리지 않은 조 ${n}개`,
+             voidL:"본문에 없음", voidR:"특약 없음" },
+};
+let MODE="version";
+const SYM=()=>LABELS[MODE].SYM, NAME=()=>LABELS[MODE].NAME;
 
 /* ═══ 4. 렌더 ═══ */
 function recompute(){ rows=align(VS[L].articles, VS[R].articles); }
 
 function render(){
   recompute();
-  renderSeg(); renderRail(); renderHead(); renderRows(); renderInspector();
+  renderSets(); renderSeg(); renderRail(); renderHead(); renderRows(); renderInspector();
   hover=-1;
+}
+function renderSets(){
+  const el=$("sets"); el.innerHTML="";
+  DATA.sets.forEach((st,i)=>{
+    const b=document.createElement("button"); b.type="button"; b.textContent=st.name;
+    b.setAttribute("aria-pressed", i===SETI?"true":"false");
+    b.onclick=()=>{ loadSet(i); render(); };
+    el.appendChild(b);
+  });
 }
 function renderSeg(){
   const s=$("seg"); s.innerHTML="";
+  if(MODE==="override"){ s.style.display="none"; return; }
+  s.style.display="";
   VS.forEach((v,i)=>{ if(i===0)return;
     const b=document.createElement("button"); b.type="button";
     b.textContent=`${VS[i-1].short} → ${v.short}`;
@@ -171,9 +218,13 @@ function renderHead(){
   $("hl").textContent=VS[L].label; $("hlm").textContent=`${VS[L].date} · ${VS[L].actor} · ${VS[L].articles.length}개 조`;
   $("hr").textContent=VS[R].label; $("hrm").textContent=`${VS[R].date} · ${VS[R].actor} · ${VS[R].articles.length}개 조`;
   const st={}; rows.forEach(r=>st[r.status]=(st[r.status]||0)+1);
-  $("tally").innerHTML=`<span class="t-del">−${st.deleted||0}</span>`+
-    `<span class="t-add">+${st.inserted||0}</span>`+
-    `<span class="t-mod">~${(st.edited||0)+(st.moved||0)}</span>`;
+  const rep=(st.edited||0)+(st.moved||0)+(st.same||0);
+  $("tally").innerHTML = MODE==="override"
+    ? `<span class="t-mod">대체 ${rep}</span><span class="t-add">신규 ${st.inserted||0}</span>`+
+      `<span style="opacity:.6">미변경 ${st.deleted||0}</span>`
+    : `<span class="t-del">−${st.deleted||0}</span>`+
+      `<span class="t-add">+${st.inserted||0}</span>`+
+      `<span class="t-mod">~${(st.edited||0)+(st.moved||0)}</span>`;
   const pairs=rows.filter(r=>r.L&&r.R);
   const ver=pairs.filter(r=>r.L.uid&&r.R.uid);
   const ok=ver.filter(r=>r.L.uid===r.R.uid).length;
@@ -188,22 +239,24 @@ function rowHTML(r,i){
   const cell=(side,d,html)=> d
     ? `<div class="cell ${side}" data-row="${i}"><div><span class="ano">${d.label}</span><span class="atl">${esc(d.title)}</span></div>`+
       `<div class="atx${long(d)?" clamp":""}">${html||esc(d.text)}</div></div>`
-    : `<div class="cell ${side} void" data-row="${i}"><span class="voidm">${side==="r"?"삭제됨":"이 버전에 없음"}</span></div>`;
-  return cell("l",r.L,r.lh)+
-    `<div class="gut s-${r.status}" data-row="${i}" title="${NAME[r.status]}${bad?" · 정렬 검수 필요":""}">`+
-    `<span class="sym">${SYM[r.status]}</span>${r.L&&r.R?`<span>${r.score.toFixed(2)}</span>`:""}</div>`+
-    cell("r",r.R,r.rh);
+    : `<div class="cell ${side} void" data-row="${i}"><span class="voidm">${side==="r"?LABELS[MODE].voidR:LABELS[MODE].voidL}</span></div>`;
+  const hi = MODE!=="override";   // 특약은 본문을 고친 게 아니라 새로 쓴 것이라 어절 diff가 의미 없다
+  return cell("l",r.L,hi?r.lh:null)+
+    `<div class="gut s-${r.status}" data-row="${i}" title="${NAME()[r.status]}${bad?" · 정렬 검수 필요":""}">`+
+    `<span class="sym">${SYM()[r.status]}</span>${r.L&&r.R?`<span>${r.score.toFixed(2)}</span>`:""}</div>`+
+    cell("r",r.R,hi?r.rh:null);
 }
 function renderRows(){
   const g=$("grid"); const out=[]; let run=[];
   const flush=()=>{ if(!run.length)return;
     if(run.length>=3 && !opened.has(run[0])){
       const a=rows[run[0]],b=rows[run[run.length-1]];
-      out.push(`<div class="fold"><button type="button" data-fold="${run[0]}">▸ 동일한 조 ${run.length}개`+
+      out.push(`<div class="fold"><button type="button" data-fold="${run[0]}">▸ ${LABELS[MODE].foldText(run.length)}`+
         `<span style="opacity:.6">${(a.L||a.R).label}–${(b.L||b.R).label}</span></button></div>`);
     } else run.forEach(i=>out.push(rowHTML(rows[i],i)));
     run=[]; };
-  rows.forEach((r,i)=>{ if(r.status==="same")run.push(i); else{flush();out.push(rowHTML(r,i));} });
+  const FOLD=LABELS[MODE].fold;
+  rows.forEach((r,i)=>{ if(r.status===FOLD)run.push(i); else{flush();out.push(rowHTML(r,i));} });
   flush(); g.innerHTML=out.join("");
 }
 $("grid").addEventListener("click",e=>{
@@ -243,11 +296,12 @@ function status(r){
     $("stSep").textContent="";$("stDet").textContent="";return;}
   $("stLive").textContent=`${r.L?r.L.label:"—"} ↔ ${r.R?r.R.label:"—"}`;
   $("stSep").textContent="│";
-  const b=[NAME[r.status]];
+  const b=[NAME()[r.status]];
   if(r.L&&r.R){ b.push(`신뢰도 ${r.score.toFixed(2)}`);
     if(r.L.uid&&r.R.uid&&r.L.uid!==r.R.uid)b.push("⚠ 정렬 검수 필요");
-    const ins=(r.rh.match(/<ins>/g)||[]).length, del=(r.lh.match(/<del>/g)||[]).length;
-    if(ins||del)b.push(`추가 ${ins}곳 · 삭제 ${del}곳`); }
+    if(MODE!=="override"){
+      const ins=(r.rh.match(/<ins>/g)||[]).length, del=(r.lh.match(/<del>/g)||[]).length;
+      if(ins||del)b.push(`추가 ${ins}곳 · 삭제 ${del}곳`); } }
   $("stDet").textContent=b.join(" · ");
 }
 
@@ -368,7 +422,7 @@ function renderInspector(){
   const list=chg.map(({r,i})=>{
     const p=merge.get(i)||(r.R?"R":"L");
     const t=(r.R||r.L);
-    return `<div class="mrow"><div class="mt">${esc(t.label)} ${esc(t.title)} · ${NAME[r.status]}</div>`+
+    return `<div class="mrow"><div class="mt">${esc(t.label)} ${esc(t.title)} · ${NAME()[r.status]}</div>`+
       `<div class="mpick">`+
       `<button type="button" data-m="${i}" data-p="L" aria-pressed="${p==="L"}" ${r.L?"":"disabled"}>좌 채택</button>`+
       `<button type="button" data-m="${i}" data-p="R" aria-pressed="${p==="R"}" ${r.R?"":"disabled"}>우 채택</button>`+
@@ -570,4 +624,4 @@ function openModal(kind,arg){
 }
 $("btnCmp").onclick=()=>{ const p=selectedPair(); if(p)openModal("cmp",p); };
 
-render(); syncTabs();
+loadSet(0); render(); syncTabs();

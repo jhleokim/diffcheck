@@ -1,21 +1,31 @@
 /* 조항 정렬 엔진 — 순서 보존 전역 정렬(Needleman-Wunsch)
    탐욕법과 달리 한 번의 오매칭이 연쇄되지 않는다. */
-const TOK = /[가-힣]{2,}|[A-Za-z0-9]+/g;
-function bag(s){ const m=(s||"").match(TOK)||[], c=new Map();
-  for(const t of m) c.set(t,(c.get(t)||0)+1); return c; }
+/* 유사도 — 문자 n-gram을 쓴다.
+   어절 토큰은 한국어 조사 때문에 무너진다: `관할법원` ↔ `관할법원의 특례` 가 0.000이 나온다.
+   형태소 분석기 없이 n-gram으로 우회한다. 제목은 길이 비대칭(본문 415자 vs 특약 82자)에
+   강하도록 코사인 대신 포함도를 쓴다. */
+function ngrams(s,n){ s=(s||"").replace(/\s+/g,""); const m=new Map();
+  for(let i=0;i+n<=s.length;i++){const g=s.slice(i,i+n); m.set(g,(m.get(g)||0)+1);} return m; }
 function cos(a,b){ let d=0,na=0,nb=0;
   for(const v of a.values()) na+=v*v;
   for(const [k,v] of b){ nb+=v*v; const x=a.get(k); if(x) d+=x*v; }
   return (na&&nb)? d/Math.sqrt(na*nb) : 0; }
+function contain(a,b){ let hit=0,tot=0; const [sm,lg]= a.size<=b.size ? [a,b] : [b,a];
+  for(const [k,v] of sm){ tot+=v; if(lg.has(k)) hit+=v; } return tot? hit/tot : 0; }
 
-/* 유사도: 제목 0.35 + 본문 0.65.
-   번호 근접도는 쓰지 않는다 — 삭제로 번호가 밀린 직후 오히려 오답으로 유도한다.
-   순서 정보는 NW의 순서 보존 제약이 이미 담당한다. */
+/* 특약·승계계약서는 본문 조를 명시적으로 인용한다 ("신탁계약 제11조에도 불구하고").
+   그 인용이 있으면 가장 확실한 근거이므로 점수를 올린다. */
+const RE_REF=/(?:신탁계약|본\s*계약|원\s*계약|원\s*도급계약)\s*제\s*(\d+)\s*조/g;
+function refs(a){ if(a._r) return a._r;
+  a._r=new Set([...(a.text||"").matchAll(RE_REF)].map(m=>+m[1])); return a._r; }
+function artNo(a){ const m=/제(\d+)조/.exec(a.label||""); return m? +m[1] : null; }
+
 function sim(a,b){
-  return 0.35*cos(a._t||(a._t=bag(a.title)), b._t||(b._t=bag(b.title)))
-       + 0.65*cos(a._b||(a._b=bag(a.text)),  b._b||(b._b=bag(b.text)));
+  a._t=a._t||ngrams(a.title,2); b._t=b._t||ngrams(b.title,2);
+  a._b=a._b||ngrams(a.text,3);  b._b=b._b||ngrams(b.text,3);
+  const na=artNo(a), bonus=(na!==null && refs(b).has(na)) ? 0.5 : 0;
+  return Math.min(1, bonus + 0.35*contain(a._t,b._t) + 0.65*cos(a._b,b._b));
 }
-
 const GAP = 0.40;     // 한쪽을 비우는 비용
 const FLOOR = 0.25;   // 이보다 낮으면 짝이 아니라 삭제+신설로 본다
 

@@ -7,6 +7,6 @@ out = (r("src/head.html")
        + "<style>\n" + r("src/app.css") + "</style>\n"
        + r("src/body.html") + "\n"
        + '<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>\n'
-       + "<script>\n" + r("src/app.js").replace("__DATA__", r("versions.json"), 1) + "\n</script>\n")
+       + "<script>\n" + r("src/app.js").replace("__DATA__", r("sets.json"), 1) + "\n</script>\n")
 io.open(os.path.join(here, "timemachine.html"), "w", encoding="utf-8").write(out)
 print("timemachine.html", len(out), "chars")
