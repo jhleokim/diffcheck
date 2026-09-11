@@ -347,24 +347,45 @@ function wdiff(a,b){
   return[ah,bh];
 }
 
-/* ═══ 2. 조문 파서 — 붙여넣기·드롭한 텍스트를 조 단위로 ═══ */
+/* ═══ 2. 조문 파서 — 붙여넣기·드롭한 텍스트를 조 단위로 ═══
+   조 제목 정규식만으로는 두 군데서 무너진다.
+     (1) 특약·승계계약서는 본문 조를 「신탁계약 제15조(분양)에도 불구하고」처럼 제목까지 붙여 인용한다.
+         그대로 두면 인용문이 조 제목으로 잡혀 없는 조가 생긴다.
+     (2) PDF에서 뽑은 텍스트는 줄바꿈이 아무 데나 들어가, 문장 중간의 「제22조」가 줄머리에 놓인다.
+   그래서 ① 인용 접두어 뒤의 히트는 버리고 ② 번호가 역행하면 버리고 ③ 인식 결과를 warn으로 돌려준다.
+   제목 없는 계약서(제1조 목적)는 제목 있는 조가 3개 미만일 때만 폴백으로 처리한다 —
+   실물 PDF에서 제목 없는 히트를 같이 인정했더니 28조 문서가 18조로 줄었다. */
+const RE_TITLED=/제\s*(\d+)\s*조(?:의\s*(\d+))?\s*\(([^)\n]{1,60})\)/g;
+const RE_BARE  =/제\s*(\d+)\s*조(?:의\s*(\d+))?(?![\s(]*\()/g;
+const RE_CITE  =/(?:신탁계약|본\s*계약|이\s*계약|원\s*계약|원\s*도급계약|동\s*계약|같은\s*법|이\s*법|위)\s*$/;
+
+function scanArticles(t, re, needLineStart, warn){
+  const out=[]; let m, last=0; re.lastIndex=0;
+  while((m=re.exec(t))!==null){
+    const no=+m[1], sub=m[2]?+m[2]:0, title=(m[3]||"").trim();
+    const before=t.slice(Math.max(0,m.index-12), m.index);
+    if(RE_CITE.test(before)){ warn.push(`다른 계약서 인용으로 보아 제외 — 제${no}조${title?`(${title})`:""}`); continue; }
+    if(needLineStart && !/(^|\n)[ \t]*$/.test(before)) continue;
+    if(no<last || (no===last && !sub)){ warn.push(`번호가 역행하여 제외 — 제${no}조${title?`(${title})`:""}`); continue; }
+    last=no; out.push({at:m.index, len:m[0].length, no, sub, title});
+  }
+  return out;
+}
 function parseArticles(raw){
   let t=raw.replace(/\r/g,"");
   if(/<[a-z][\s\S]*>/i.test(t)){const d=document.createElement("div");d.innerHTML=t;t=d.textContent;}
-  const re=/제\s*(\d+)\s*조(?:의\s*(\d+))?\s*\(([^)\n]{1,60})\)/g;
-  const hits=[...t.matchAll(re)];
-  if(!hits.length)return[];
-  const arts=[];
-  hits.forEach((h,k)=>{
-    const start=h.index+h[0].length;
-    const end=k+1<hits.length?hits[k+1].index:t.length;
-    arts.push({
-      label:`제${h[1]}조`+(h[2]?`의${h[2]}`:""),
-      title:h[3].trim(),
-      text:t.slice(start,end).replace(/\s+/g," ").trim().slice(0,1400)
-    });
-  });
-  return arts;
+  const warn=[];
+  let hits=scanArticles(t, RE_TITLED, false, warn);
+  if(hits.length<3){ warn.length=0; hits=scanArticles(t, RE_BARE, true, warn); }
+  if(!hits.length)return Object.assign([],{warn});
+  const arts=hits.map((h,k)=>({
+    label:`제${h.no}조`+(h.sub?`의${h.sub}`:""),
+    title:h.title,
+    text:t.slice(h.at+h.len, k+1<hits.length?hits[k+1].at:t.length).replace(/\s+/g," ").trim().slice(0,1400)
+  }));
+  const max=hits[hits.length-1].no;
+  if(arts.length<max)warn.push(`마지막 조가 제${max}조인데 ${arts.length}개만 인식됐습니다 — 누락 가능`);
+  return Object.assign(arts,{warn});
 }
 
 /* ═══ 계약서 파일 판독 — hwpx / docx는 ZIP+XML이라 JSZip으로 직접 연다 ═══ */
@@ -641,6 +662,7 @@ dz.addEventListener("drop",async e=>{
     if(!arts.length) throw Object.assign(new Error(
       "조문을 찾지 못했습니다. 「제1조(총칙)」 형식의 조 제목이 있는 계약서인지 확인해주세요."),{title:"조문 인식 실패",guide:true});
     addVersion(arts, f.name.replace(/\.[^.]+$/,""), "파일");
+    if(arts.warn&&arts.warn.length)openModal("warn",{name:f.name,n:arts.length,warn:arts.warn});
   }catch(err){
     openModal("err",{title:err.title||"파일을 읽지 못했습니다", msg:err.message, name:f.name});
   }finally{ dz.innerHTML=DZ_HTML; }
@@ -853,7 +875,8 @@ function openModal(kind,arg){
     $("pC").onclick=closeModal;
     $("pO").onclick=()=>{ const arts=parseArticles($("pText").value);
       if(!arts.length){alert("조문을 찾지 못했습니다.");return;}
-      addVersion(arts,$("pName").value.trim()||null,$("pActor").value.trim()||null); closeModal(); };
+      addVersion(arts,$("pName").value.trim()||null,$("pActor").value.trim()||null); closeModal();
+      if(arts.warn&&arts.warn.length)openModal("warn",{name:"붙여넣은 텍스트",n:arts.length,warn:arts.warn}); };
   }
   if(kind==="err"){
     modal.innerHTML=`<h2>${esc(arg.title)}</h2><div class="mb">`+
@@ -863,6 +886,17 @@ function openModal(kind,arg){
       `구버전 .hwp / .doc와 .pdf는 본문 구조를 신뢰할 수 있게 읽어낼 수 없어 받지 않습니다.</div></div>`+
       `<div class="mf"><button class="btn pri" id="eC">확인</button></div>`;
     $("eC").onclick=closeModal;
+  }
+  if(kind==="warn"){
+    // 조 인식은 끝났지만 미심쩍은 것이 남았다. 진행은 막지 않되 숨기지도 않는다(§7.4와 같은 원칙).
+    modal.innerHTML=`<h2>조 ${arg.n}개를 인식했습니다 — 확인이 필요합니다</h2><div class="mb">`+
+      `<div style="font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-bottom:9px">${esc(arg.name)}</div>`+
+      `<ul style="font-size:12.5px;line-height:1.9;padding-left:18px;margin:0">`+
+      arg.warn.map(w=>`<li>${esc(w)}</li>`).join("")+`</ul>`+
+      `<div class="note" style="margin-top:12px">인용문이 조 제목으로 잘못 잡히는 것을 막기 위해 걸러낸 것입니다. `+
+      `실제 조가 빠졌다면 해당 부분을 붙여넣기로 따로 추가해주세요.</div></div>`+
+      `<div class="mf"><button class="btn pri" id="wC">확인</button></div>`;
+    $("wC").onclick=closeModal;
   }
   if(kind==="cmp"){
     const [li,ri]=arg, a=VS[li], b=VS[ri], data=cmpRows(a,b);
