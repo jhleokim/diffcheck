@@ -178,12 +178,14 @@ async function readContract(file){
 
 /* ═══ 3. 상태 ═══ */
 let SETI=0, VS=[];
-let L=0, R=1, hover=-1, opened=new Set(), tab="hist", merge=new Map(), rows=[];
+let L=0, R=1, hover=-1, opened=new Set(), tab="hist", merge=new Map(), rows=[]
+let checkSide=null;   // 문서 점검 탭이 보는 쪽 — 세트를 바꾸면 모드에 맞게 다시 정한다
 function loadSet(i){
   SETI=i; const st=DATA.sets[i];
   MODE=st.mode||"version";
   VS=st.versions.map(v=>({...v, articles:v.articles.map(a=>({...a}))}));
   L=0; R=Math.min(1,VS.length-1); opened=new Set(); merge=new Map();
+  checkSide=null;
   $("src").textContent=st.source||"";
 }
 /* 모드에 따라 같은 정렬 결과가 다른 의미를 갖는다.
@@ -193,17 +195,40 @@ const LABELS={
             NAME:{same:"동일",moved:"번호 이동",edited:"내용 변경",inserted:"신설",deleted:"삭제"},
             fold:"same", foldText:n=>`동일한 조 ${n}개`,
             voidL:"이 버전에 없음", voidR:"삭제됨" },
-  override:{ SYM:{same:"→",moved:"→",edited:"→",inserted:"+",deleted:"·"},
+  override:{ SYM:{same:"→",moved:"→",edited:"→",inserted:"+",deleted:"·",unmet:"⚠"},
              NAME:{same:"특약이 대체",moved:"특약이 대체",edited:"특약이 대체",
-                   inserted:"본문에 없는 신규 특약",deleted:"특약 없음 (본문 그대로)"},
+                   inserted:"본문에 없는 신규 특약",deleted:"특약 없음 (본문 그대로)",
+                   unmet:"본문이 특약에 위임했는데 특약이 없음"},
              fold:"deleted", foldText:n=>`특약이 건드리지 않은 조 ${n}개`,
              voidL:"본문에 없음", voidR:"특약 없음" },
 };
 let MODE="version";
 const SYM=()=>LABELS[MODE].SYM, NAME=()=>LABELS[MODE].NAME;
 
+/* 본문이 스스로 판단을 특약에 넘긴 자리 — 실물 약관에서 5곳 확인됐다(설계 §2.1).
+   그중 제29조①단서("…신탁특약에서 정하는 바에 따라 그 지급을 하지 않을 수 있다")는
+   유보금의 유일한 근거다. 특약이 이 자리에 침묵하면 근거가 사라지는데,
+   override 모드의 접기 규칙은 바로 그 경우를 "특약 없음 → 접기"로 화면에서 지운다.
+   그래서 위임 문형이 있는 본문 조는 짝이 없을 때 접지 않고 최상단에 고정한다.
+   문형: 신탁특약 … 정하는/정한  (중간에 20여 자가 끼는 형태까지 — 제28·29조의 귀속권리자) */
+const RE_DELEG=/신탁특약[^.]{0,25}?정[하한]/;
+const delegated=a=>!!a&&RE_DELEG.test(a.text||"");
+
 /* ═══ 4. 렌더 ═══ */
-function recompute(){ rows=align(VS[L].articles, VS[R].articles); }
+function recompute(){
+  rows=align(VS[L].articles, VS[R].articles);
+  if(MODE==="override")
+    rows.forEach(r=>{
+      if(r.status!=="deleted"||!delegated(r.L))return;
+      r.status="unmet";
+      /* "특약에 없다"는 판정은 정렬이 맞았을 때만 참이다. 정렬이 짝을 놓쳤을 수도 있으므로
+         단정하지 않는다.
+         → 한때 "가장 가까운 특약"을 힌트로 붙였다가 뺐다. 세 건 모두 엉뚱한 조를 가리켰다
+           (본문 제15조 분양 → 특약 제4조 신탁재산의 추가 편입 0.18). 최유사로 짝을 찾는 것은
+           이 프로젝트가 이미 부정 결과로 확인한 방법이다(설계 §2.2, 3/35).
+           틀린 단서를 주느니 "확인하라"고만 말하는 편이 낫다. */
+    });
+}
 
 function render(){
   recompute();
@@ -242,6 +267,7 @@ function renderHead(){
   const rep=(st.edited||0)+(st.moved||0)+(st.same||0);
   $("tally").innerHTML = MODE==="override"
     ? `<span class="t-mod">대체 ${rep}</span><span class="t-add">신규 ${st.inserted||0}</span>`+
+      (st.unmet?`<span class="t-del">위임 미이행 ${st.unmet}</span>`:"")+
       `<span style="opacity:.6">미변경 ${st.deleted||0}</span>`
     : `<span class="t-del">−${st.deleted||0}</span>`+
       `<span class="t-add">+${st.inserted||0}</span>`+
@@ -260,6 +286,10 @@ function rowHTML(r,i){
   const cell=(side,d,html)=> d
     ? `<div class="cell ${side}" data-row="${i}"><div><span class="ano">${d.label}</span><span class="atl">${esc(d.title)}</span></div>`+
       `<div class="atx${long(d)?" clamp":""}">${html||esc(d.text)}</div></div>`
+    : side==="r"&&r.status==="unmet"
+    ? `<div class="cell r void hint" data-row="${i}"><span class="voidm">특약에 대응 조문 없음</span>`+
+      `<span class="hintm">본문이 특약에 넘긴 자리입니다. <b>특약이 침묵하면 근거가 사라집니다.</b><br>`+
+      `정렬이 짝을 놓친 것은 아닌지도 함께 확인하세요</span></div>`
     : `<div class="cell ${side} void" data-row="${i}"><span class="voidm">${side==="r"?LABELS[MODE].voidR:LABELS[MODE].voidL}</span></div>`;
   const hi = MODE!=="override";   // 특약은 본문을 고친 게 아니라 새로 쓴 것이라 어절 diff가 의미 없다
   return cell("l",r.L,hi?r.lh:null)+
@@ -269,6 +299,14 @@ function rowHTML(r,i){
 }
 function renderRows(){
   const g=$("grid"); const out=[]; let run=[];
+  // 위임 미이행은 "변화가 없어서" 눈에 안 띄는 항목이다. 접기 대상에서 빼는 것만으로는
+  // 부족해서 최상단으로 끌어올린다. 인덱스는 data-row로 박히므로 순서를 바꿔도 트래킹은 유지된다.
+  const pin=rows.reduce((v,r,i)=>(r.status==="unmet"&&v.push(i),v),[]);
+  if(pin.length){
+    out.push(`<div class="fold pin"><button type="button" disabled>⚠ 본문이 특약에 위임한 자리인데 특약이 없습니다 · ${pin.length}건`+
+      `<span style="opacity:.7">${pin.map(i=>rows[i].L.label).join(" · ")}</span></button></div>`);
+    pin.forEach(i=>out.push(rowHTML(rows[i],i)));
+  }
   const flush=()=>{ if(!run.length)return;
     if(run.length>=3 && !opened.has(run[0])){
       const a=rows[run[0]],b=rows[run[run.length-1]];
@@ -277,7 +315,8 @@ function renderRows(){
     } else run.forEach(i=>out.push(rowHTML(rows[i],i)));
     run=[]; };
   const FOLD=LABELS[MODE].fold;
-  rows.forEach((r,i)=>{ if(r.status===FOLD)run.push(i); else{flush();out.push(rowHTML(r,i));} });
+  rows.forEach((r,i)=>{ if(r.status==="unmet")return;         // 위에서 이미 올렸다
+    if(r.status===FOLD)run.push(i); else{flush();out.push(rowHTML(r,i));} });
   flush(); g.innerHTML=out.join("");
 }
 $("grid").addEventListener("click",e=>{
@@ -407,10 +446,59 @@ dz.addEventListener("drop",async e=>{
 });
 const DZ_HTML=dz.innerHTML;
 
-/* ═══ 8. 인스펙터: 조항 이력 / 최종본 만들기 ═══ */
+/* ═══ 8-0. 단일 문서 점검 — 비교 상대가 없어도 동작한다 (설계 §8.4) ═══
+   전부 정규식이고 도메인 룰을 요구하지 않는다. 실물 신고 약관 한 건에서 아래가 전부 나왔다. */
+
+/* (1) 잔존 공란. 체결 직전 문서에 남아 있으면 사고다. */
+const BLANKS=[["빈칸 [ ]",/\[\s+\]/g],["밑줄 공란",/_{3,}/g],["빈 괄호",/\(\s{2,}\)/g],
+              ["날짜 미기재",/년\s+월\s+일/g],["○○ 표기",/[○◯]{2,}/g],["미정 표기",/(?:TBD|미정|추후\s*협의)/g]];
+function scanBlanks(arts){
+  const out=[];
+  for(const a of arts)for(const [name,re] of BLANKS){
+    re.lastIndex=0; let m;
+    while((m=re.exec(a.text||""))!==null)
+      out.push({label:a.label,kind:name,ctx:a.text.slice(Math.max(0,m.index-22),m.index+m[0].length+12)});
+  }
+  return out;
+}
+/* (2) 상호참조 무결성. 조가 신설·삭제되면 번호는 밀리는데 본문 속 인용 숫자는 안 따라간다.
+   두 가지를 반드시 걸러야 한다 — 안 그러면 오탐이 실제로 났다:
+     · 법령 인용 (「건설산업기본법」 제54조) — 우리 문서의 조가 아니다
+     · 다른 계약서 인용 (신탁계약 제33조) — 특약이 본문을 부르는 정상적인 참조 */
+const RE_LAW=/(?:법|법률|시행령|시행규칙|규칙|조례|약관|규정|기준)\s*$/;
+const RE_XDOC=/(?:신탁계약|본\s*계약|이\s*계약|원\s*계약|원\s*도급계약|동\s*계약)\s*$/;
+function scanRefs(arts){
+  const have=new Set(arts.map(a=>(a.label||"").replace(/\s/g,"")));
+  const out=[]; let total=0;
+  for(const a of arts){
+    const re=/제\s*(\d+)\s*조(?:의\s*(\d+))?/g; let m;
+    while((m=re.exec(a.text||""))!==null){
+      const before=(a.text||"").slice(Math.max(0,m.index-14),m.index);
+      if(RE_LAW.test(before)||RE_XDOC.test(before))continue;
+      total++;
+      const lab=`제${m[1]}조`+(m[2]?`의${m[2]}`:"");
+      if(!have.has(lab))out.push({label:a.label,to:lab});
+    }
+  }
+  return {total,broken:out};
+}
+/* (3) 용어 외연. 한 계약서 안에서 '수익자'의 범위가 세 번 달라지는 것이 실물에서 확인됐다.
+   법률문서에서 이건 오류가 아니라 의도된 국소 재정의라서 — 판정하지 않고 목록만 낸다. */
+const RE_SCOPE=/(?:[^\s(（]{2,12})\s*[((][^)）]{0,40}?(?:포함한다|포함하지\s*아니한다|포함되지\s*아니하며|포함되지\s*않으며|제외한다)/g;
+function scanScope(arts){
+  const out=[];
+  for(const a of arts){ RE_SCOPE.lastIndex=0; let m;
+    while((m=RE_SCOPE.exec(a.text||""))!==null)out.push({label:a.label,ctx:m[0]});
+  }
+  return out;
+}
+
+/* ═══ 8. 인스펙터: 조항 이력 / 문서 점검 / 검토본 만들기 ═══ */
 $("tabHist").onclick=()=>{tab="hist";syncTabs();renderInspector();};
+$("tabCheck").onclick=()=>{tab="check";syncTabs();renderInspector();};
 $("tabMerge").onclick=()=>{tab="merge";syncTabs();renderInspector();};
 function syncTabs(){$("tabHist").setAttribute("aria-selected",tab==="hist");
+  $("tabCheck").setAttribute("aria-selected",tab==="check");
   $("tabMerge").setAttribute("aria-selected",tab==="merge");}
 function renderInspector(){
   const b=$("ibody");
@@ -439,7 +527,35 @@ function renderInspector(){
       `<div class="note">막대 길이 = 조문 분량. 색이 바뀐 회차가 그 조항이 실제로 손대진 지점입니다.</div>`;
     return;
   }
-  // 최종본 만들기
+  if(tab==="check"){
+    // 이 탭은 비교가 아니라 문서 한 건을 본다. 그래서 어느 쪽을 볼지 고르게 한다 —
+    // 버전 비교에서는 최신 제출본(우), 본문↔특약에서는 신고 약관 본문(좌)이 보통 관심 대상이다.
+    if(checkSide===null)checkSide=MODE==="override"?"L":"R";
+    const v=checkSide==="L"?VS[L]:VS[R], arts=v.articles;
+    const bl=scanBlanks(arts), rf=scanRefs(arts), sc=scanScope(arts);
+    const sec=(t,n,body,tone)=>`<div class="ck ${tone||""}"><div class="ckh">${t}`+
+      `<span class="ckn">${n}</span></div>${body}</div>`;
+    b.innerHTML=`<div class="ih">문서 점검</div>`+
+      `<div class="mpick" style="margin-bottom:9px">`+
+      `<button type="button" data-side="L" aria-pressed="${checkSide==="L"}">${esc(VS[L].short)}</button>`+
+      `<button type="button" data-side="R" aria-pressed="${checkSide==="R"}">${esc(VS[R].short)}</button></div>`+
+      `<div class="lt">${esc(v.label)} · ${arts.length}개 조</div>`+
+      sec("잔존 공란",bl.length, bl.length
+        ? bl.map(x=>`<div class="cki"><b>${esc(x.label)}</b> ${esc(x.kind)}<span>…${esc(x.ctx)}…</span></div>`).join("")
+        : `<div class="cki ok">남아 있는 공란이 없습니다</div>`, bl.length?"bad":"")+
+      sec("깨진 상호참조",rf.broken.length, rf.broken.length
+        ? rf.broken.map(x=>`<div class="cki"><b>${esc(x.label)}</b> → ${esc(x.to)} <span>그 조가 이 문서에 없습니다</span></div>`).join("")
+        : `<div class="cki ok">내부 참조 ${rf.total}건 모두 실재하는 조를 가리킵니다</div>`, rf.broken.length?"bad":"")+
+      sec("용어 범위의 국소 재정의",sc.length, sc.length
+        ? sc.map(x=>`<div class="cki"><b>${esc(x.label)}</b><span>${esc(x.ctx)}</span></div>`).join("")
+        : `<div class="cki ok">범위를 다시 정의하는 표현이 없습니다</div>`)+
+      `<div class="note">공란과 참조는 <b>사고</b>이므로 고쳐야 합니다. 용어 재정의는 법률문서에서 흔히 <b>의도된 것</b>이라 `+
+      `판정하지 않고 목록만 냅니다 — 같은 낱말의 범위가 조마다 다른지 직접 보세요.</div>`;
+    b.querySelectorAll("[data-side]").forEach(btn=>btn.onclick=()=>{
+      checkSide=btn.dataset.side; renderInspector(); });
+    return;
+  }
+  // 검토본 만들기
   const chg=rows.map((r,i)=>({r,i})).filter(x=>x.r.status!=="same");
   const list=chg.map(({r,i})=>{
     const p=merge.get(i)||(r.R?"R":"L");
@@ -589,8 +705,9 @@ async function exportCompare(li,ri){
   if(r==="failed")openModal("err",{title:"추출 실패",msg:"파일을 저장하지 못했습니다.",name:"대비표.docx"});
 }
 async function exportContract(arts){
-  const xml=para("계약서 최종본",{b:true,sz:32,align:"center"})+
-    para(`diffcheck 검토 확정 · ${arts.length}개 조`,{sz:16,color:"666666",align:"center"})+para("")+
+  // "최종본"이라 부르지 않는다 — 무엇이 최종이 될지는 검토가 끝나야 안다(설계 §7.7).
+  const xml=para("계약서 검토본",{b:true,sz:32,align:"center"})+
+    para(`diffcheck 검토 결과 · ${arts.length}개 조`,{sz:16,color:"666666",align:"center"})+para("")+
     arts.map(a=>para(`${a.label}(${a.title})`,{b:true,sz:20})+para(a.text,{sz:18})+para("")).join("");
   let blob; try{ blob=await docxBlob(xml,false); }
   catch(e){ openModal("err",{title:e.title||"추출 실패",msg:e.message,name:"계약서.docx"}); return; }
